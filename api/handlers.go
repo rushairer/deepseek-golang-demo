@@ -3,10 +3,12 @@ package api
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 
 	"deepseek_golang_demo/models"
+	"deepseek_golang_demo/services/actions"
 	"deepseek_golang_demo/services/deepseek"
 
 	"github.com/gin-gonic/gin"
@@ -34,17 +36,20 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 func (s *Server) HandleAnalyzeData(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
+		log.Printf("无效的记录ID: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的记录ID"})
 		return
 	}
 
 	record, err := models.GetDataRecord(s.db, id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error getting record: %v", err)})
+		log.Printf("获取记录失败 (ID: %d): %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取记录失败: %v", err)})
 		return
 	}
 	if record == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
+		log.Printf("记录未找到 (ID: %d)", id)
+		c.JSON(http.StatusNotFound, gin.H{"error": "记录未找到"})
 		return
 	}
 
@@ -54,7 +59,8 @@ func (s *Server) HandleAnalyzeData(c *gin.Context) {
 	// 调用DeepSeek API进行分析
 	response, err := s.deepseekCli.AnalyzeData(prompt, record)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error analyzing data: %v", err)})
+		log.Printf("数据分析失败 (ID: %d): %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("数据分析失败: %v", err)})
 		return
 	}
 
@@ -67,8 +73,16 @@ func (s *Server) HandleAnalyzeData(c *gin.Context) {
 	}
 
 	if err := models.SaveAnalysisResult(s.db, result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error saving analysis result: %v", err)})
+		log.Printf("保存分析结果失败 (ID: %d): %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("保存分析结果失败: %v", err)})
 		return
+	}
+
+	// 执行建议的操作
+	for i, action := range response.Actions {
+		if err := actions.ExecuteAction(action, s.db); err != nil {
+			log.Printf("执行操作失败 (ID: %d, 操作索引: %d, 类型: %s): %v", id, i, action.Type, err)
+		}
 	}
 
 	c.JSON(http.StatusOK, result)

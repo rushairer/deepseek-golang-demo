@@ -2,9 +2,11 @@ package deepseek
 
 import (
 	"bytes"
+	"deepseek_golang_demo/models"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 )
 
@@ -32,9 +34,10 @@ type ChatCompletionResponse struct {
 }
 
 type AnalysisResponse struct {
-	Analysis    string   `json:"analysis"`
-	Suggestions []string `json:"suggestions"`
-	Confidence  float64  `json:"confidence"`
+	Analysis    string          `json:"analysis"`
+	Suggestions []string        `json:"suggestions"`
+	Confidence  float64         `json:"confidence"`
+	Actions     []models.Action `json:"actions"`
 }
 
 func NewClient(apiKey string) *Client {
@@ -58,12 +61,46 @@ func (c *Client) AnalyzeData(prompt string, data interface{}) (*AnalysisResponse
 {
     "analysis": "这里是分析结果文本",
     "suggestions": ["建议1", "建议2", "建议3"],
-    "confidence": 0.95
+    "confidence": 0.95,
+    "actions": [
+        {
+            "type": "database",
+            "target": "update_status 或 add_tag",
+            "params": {
+                "record_id": 123,
+                "status": "新状态" // 当 target 为 update_status 时
+                "tag": "标签名称" // 当 target 为 add_tag 时
+            },
+            "priority": 1
+        },
+        {
+            "type": "notification",
+            "target": "发送通知",
+            "params": {
+                "record_id": 123,
+                "message": "通知内容",
+                "channel": "通知渠道"
+            },
+            "priority": 2
+        },
+        {
+            "type": "tag",
+            "target": "添加标签",
+            "params": {
+                "record_id": 123,
+                "tag": "标签名称"
+            },
+            "priority": 3
+        }
+    ]
 }
 请注意：
 1. 不要添加任何额外的文本或 Markdown 标记
 2. confidence 必须是 0-1 之间的浮点数
-3. suggestions 必须是字符串数组`},
+3. suggestions 必须是字符串数组
+4. actions 中的每个操作都必须包含 type、target、params、priority 字段
+5. record_id 必须是数值类型
+6. 每种操作类型都有其特定的参数要求，请严格按照示例格式提供`},
 			{Role: "user", Content: content},
 		},
 	}
@@ -99,13 +136,13 @@ func (c *Client) AnalyzeData(prompt string, data interface{}) (*AnalysisResponse
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
 		return nil, fmt.Errorf("error decoding API response: %v", err)
 	}
+	log.Println("DeepSeek API Response: ", apiResp)
 
 	if len(apiResp.Choices) == 0 {
 		return nil, fmt.Errorf("no choices in response")
 	}
 
 	content = apiResp.Choices[0].Message.Content
-	fmt.Printf("DeepSeek Content Response: %s\n", content)
 
 	var analysisResp AnalysisResponse
 	if err := json.Unmarshal([]byte(content), &analysisResp); err != nil {

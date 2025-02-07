@@ -195,7 +195,7 @@ curl -X POST http://localhost:8080/api/records \
   -H "Content-Type: application/json" \
   -d '{
     "type": "text",
-    "content": "这是一段需要分析的文本内容",
+    "content": "你好，我在使用贵公司服务的时候遇到了问题，在你们在线帮助中没有获得有用的信息。请帮我联系你们的人工客服解决问题。",
     "metadata": "{\"source\": \"user_feedback\", \"priority\": \"high\"}"
   }'
 ```
