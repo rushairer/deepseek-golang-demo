@@ -8,7 +8,6 @@ import (
 
 	"deepseek_golang_demo/api"
 	"deepseek_golang_demo/models"
-	"deepseek_golang_demo/prompts"
 	"deepseek_golang_demo/services/deepseek"
 
 	"github.com/gin-gonic/gin"
@@ -89,12 +88,6 @@ func main() {
 
 	// 初始化DeepSeek客户端
 	deepseekCli := deepseek.NewClient(apiKey)
-
-	// 初始化提示词模板管理器
-	templateManager := prompts.NewTemplateManager()
-	for _, template := range prompts.DefaultTemplates() {
-		templateManager.RegisterTemplate(template)
-	}
 
 	// 初始化HTTP服务器
 	server := api.NewServer(db, deepseekCli)
