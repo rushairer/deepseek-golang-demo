@@ -1,111 +1,181 @@
 package actions
 
 import (
-	"database/sql"
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
-	"log"
+	"io"
+	"strings"
 
 	"deepseek_golang_demo/models"
-	"deepseek_golang_demo/services/notification"
+	"deepseek_golang_demo/services/deepseek"
 )
 
-// ExecuteAction 执行建议操作
-func ExecuteAction(action models.Action, db *sql.DB) error {
-	switch action.Type {
-	case "database":
-		return executeDatabaseAction(action, db)
-	case "notification":
-		return executeNotificationAction(action, db)
-	case "tag":
-		return executeTaggingAction(action, db)
-	default:
-		return fmt.Errorf("unknown action type: %s", action.Type)
-	}
+const (
+	ToolUpdateStatus     = "update_record_status"
+	ToolAddTag           = "add_record_tag"
+	ToolSendNotification = "send_notification"
+)
+
+type Store interface {
+	UpdateStatus(context.Context, int64, string) error
+	AddTag(context.Context, int64, string) error
+	CreateNotification(context.Context, models.Notification) (int64, bool, error)
+	UpdateNotificationStatus(context.Context, int64, string) error
+	CreateApproval(context.Context, models.ApprovalRequest) (int64, error)
+}
+type Notifier interface {
+	Send(context.Context, string, string, string) error
+	HasTarget(string, string) bool
+}
+type Executor struct {
+	store           Store
+	notifier        Notifier
+	requireApproval bool
+}
+type ExecutionContext struct{ RunID, RecordID int64 }
+type Result struct {
+	ToolCallID string         `json:"toolCallId"`
+	ToolName   string         `json:"toolName"`
+	Status     string         `json:"status"`
+	Data       map[string]any `json:"data,omitempty"`
+	Error      string         `json:"error,omitempty"`
+}
+type updateStatusArgs struct {
+	Status string `json:"status"`
+}
+type addTagArgs struct {
+	Tag string `json:"tag"`
+}
+type sendArgs struct {
+	Channel string `json:"channel"`
+	Target  string `json:"target"`
+	Message string `json:"message"`
 }
 
-// executeDatabaseAction 执行数据库操作
-func executeDatabaseAction(action models.Action, db *sql.DB) error {
-	switch action.Target {
-	case "update_status":
-		status, ok := action.Params["status"].(string)
-		if !ok {
-			return fmt.Errorf("invalid status parameter")
+func NewExecutor(s Store, n Notifier, approval bool) *Executor {
+	return &Executor{store: s, notifier: n, requireApproval: approval}
+}
+func (e *Executor) Tools() []deepseek.Tool {
+	return []deepseek.Tool{
+		{Type: "function", Function: deepseek.FunctionTool{Name: ToolUpdateStatus, Description: "Update the status of the current record. The server binds the record ID.", Strict: true, Parameters: schema(map[string]any{"status": map[string]any{"type": "string", "enum": []string{"new", "processing", "needs_review", "resolved", "ignored"}}}, []string{"status"})}},
+		{Type: "function", Function: deepseek.FunctionTool{Name: ToolAddTag, Description: "Attach a concise tag to the current record.", Strict: true, Parameters: schema(map[string]any{"tag": map[string]any{"type": "string", "minLength": 1, "maxLength": 64}}, []string{"tag"})}},
+		{Type: "function", Function: deepseek.FunctionTool{Name: ToolSendNotification, Description: "Request a notification through a configured target alias.", Strict: true, Parameters: schema(map[string]any{"channel": map[string]any{"type": "string", "enum": []string{"email", "webhook"}}, "target": map[string]any{"type": "string", "minLength": 1, "maxLength": 64}, "message": map[string]any{"type": "string", "minLength": 1, "maxLength": 2000}}, []string{"channel", "target", "message"})}}}
+}
+func (e *Executor) Execute(ctx context.Context, x ExecutionContext, c deepseek.ToolCall) Result {
+	r := Result{ToolCallID: c.ID, ToolName: c.Function.Name, Status: "failed"}
+	switch c.Function.Name {
+	case ToolUpdateStatus:
+		var a updateStatusArgs
+		if err := decode(c.Function.Arguments, &a); err != nil {
+			r.Error = err.Error()
+			return r
 		}
-		id, ok := action.Params["record_id"].(float64)
-		if !ok {
-			return fmt.Errorf("invalid record_id parameter")
+		allowed := map[string]bool{"new": true, "processing": true, "needs_review": true, "resolved": true, "ignored": true}
+		if !allowed[a.Status] {
+			r.Error = "invalid status"
+			return r
 		}
-		return models.UpdateStatus(db, fmt.Sprintf("%d", int64(id)), status)
-
-	case "add_tag":
-		tag, ok := action.Params["tag"].(string)
-		if !ok {
-			return fmt.Errorf("invalid tag parameter")
+		if err := e.store.UpdateStatus(ctx, x.RecordID, a.Status); err != nil {
+			r.Error = err.Error()
+			return r
 		}
-		id, ok := action.Params["record_id"].(float64)
-		if !ok {
-			return fmt.Errorf("invalid record_id parameter")
+		r.Status = "succeeded"
+		r.Data = map[string]any{"recordId": x.RecordID, "status": a.Status}
+		return r
+	case ToolAddTag:
+		var a addTagArgs
+		if err := decode(c.Function.Arguments, &a); err != nil {
+			r.Error = err.Error()
+			return r
 		}
-		return models.AddTag(db, fmt.Sprintf("%d", int64(id)), tag)
-
+		a.Tag = strings.TrimSpace(a.Tag)
+		if a.Tag == "" || len([]rune(a.Tag)) > 64 {
+			r.Error = "tag must contain 1 to 64 characters"
+			return r
+		}
+		if err := e.store.AddTag(ctx, x.RecordID, a.Tag); err != nil {
+			r.Error = err.Error()
+			return r
+		}
+		r.Status = "succeeded"
+		r.Data = map[string]any{"recordId": x.RecordID, "tag": a.Tag}
+		return r
+	case ToolSendNotification:
+		var a sendArgs
+		if err := decode(c.Function.Arguments, &a); err != nil {
+			r.Error = err.Error()
+			return r
+		}
+		a.Channel = strings.ToLower(strings.TrimSpace(a.Channel))
+		a.Target = strings.TrimSpace(a.Target)
+		a.Message = strings.TrimSpace(a.Message)
+		if !e.notifier.HasTarget(a.Channel, a.Target) {
+			r.Error = "notification target is not configured"
+			return r
+		}
+		if e.requireApproval {
+			b, _ := json.Marshal(a)
+			id, err := e.store.CreateApproval(ctx, models.ApprovalRequest{RunID: x.RunID, RecordID: x.RecordID, ToolCallID: c.ID, ToolName: c.Function.Name, Arguments: string(b)})
+			if err != nil {
+				r.Error = err.Error()
+				return r
+			}
+			r.Status = "pending_approval"
+			r.Data = map[string]any{"approvalId": id}
+			return r
+		}
+		return e.send(ctx, x, c.ID, a)
 	default:
-		return fmt.Errorf("unknown database action target: %s", action.Target)
+		r.Error = "unknown tool"
+		return r
 	}
 }
-
-// executeNotificationAction 执行通知操作
-func executeNotificationAction(action models.Action, db *sql.DB) error {
-	message, ok := action.Params["message"].(string)
-	if !ok {
-		return fmt.Errorf("invalid message parameter")
+func (e *Executor) ExecuteApprovedNotification(ctx context.Context, a *models.ApprovalRequest) Result {
+	var args sendArgs
+	if err := decode(a.Arguments, &args); err != nil {
+		return Result{ToolCallID: a.ToolCallID, ToolName: a.ToolName, Status: "failed", Error: err.Error()}
 	}
-
-	channel, ok := action.Params["channel"].(string)
-	if !ok {
-		return fmt.Errorf("invalid channel parameter")
+	return e.send(ctx, ExecutionContext{RunID: a.RunID, RecordID: a.RecordID}, a.ToolCallID, args)
+}
+func (e *Executor) send(ctx context.Context, x ExecutionContext, id string, a sendArgs) Result {
+	r := Result{ToolCallID: id, ToolName: ToolSendNotification, Status: "failed"}
+	key := fmt.Sprintf("run:%d:tool:%s", x.RunID, id)
+	nid, created, err := e.store.CreateNotification(ctx, models.Notification{RecordID: x.RecordID, Channel: a.Channel, Target: a.Target, Message: a.Message, IdempotencyKey: key})
+	if err != nil {
+		r.Error = err.Error()
+		return r
 	}
-
-	recordID, ok := action.Params["record_id"].(float64)
-	if !ok {
-		return fmt.Errorf("invalid record_id parameter")
+	if !created {
+		r.Status = "succeeded"
+		r.Data = map[string]any{"notificationId": nid, "duplicate": true}
+		return r
 	}
-
-	// Create notification record
-	if err := models.CreateNotification(db, int64(recordID), channel, message); err != nil {
-		log.Printf("Failed to create notification: %v", err)
-		return fmt.Errorf("failed to create notification: %v", err)
+	if err := e.notifier.Send(ctx, a.Channel, a.Target, a.Message); err != nil {
+		_ = e.store.UpdateNotificationStatus(ctx, nid, "failed")
+		r.Error = err.Error()
+		return r
 	}
-
-	// Send notification
-	if err := notification.Send(channel, message, action.Params); err != nil {
-		log.Printf("Failed to send notification: %v", err)
-		// Update notification status to failed
-		if updateErr := models.UpdateNotificationStatus(db, int64(recordID), "failed"); updateErr != nil {
-			log.Printf("Failed to update notification status: %v", updateErr)
-		}
-		return fmt.Errorf("failed to send notification: %v", err)
+	if err := e.store.UpdateNotificationStatus(ctx, nid, "sent"); err != nil {
+		r.Error = err.Error()
+		return r
 	}
-
-	// Update notification status to sent
-	if err := models.UpdateNotificationStatus(db, int64(recordID), "sent"); err != nil {
-		log.Printf("Failed to update notification status: %v", err)
-		return fmt.Errorf("failed to update notification status: %v", err)
+	r.Status = "succeeded"
+	r.Data = map[string]any{"notificationId": nid}
+	return r
+}
+func schema(p map[string]any, r []string) map[string]any {
+	return map[string]any{"type": "object", "properties": p, "required": r, "additionalProperties": false}
+}
+func decode(raw string, v any) error {
+	d := json.NewDecoder(bytes.NewBufferString(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(v); err != nil {
+		return fmt.Errorf("invalid tool arguments: %w", err)
 	}
-
+	if err := d.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("invalid tool arguments: trailing JSON data")
+	}
 	return nil
-}
-
-// executeTaggingAction 执行标记操作
-func executeTaggingAction(action models.Action, db *sql.DB) error {
-	tag, ok := action.Params["tag"].(string)
-	if !ok {
-		return fmt.Errorf("invalid tag parameter")
-	}
-
-	id, ok := action.Params["record_id"].(float64)
-	if !ok {
-		return fmt.Errorf("invalid record_id parameter")
-	}
-
-	return models.AddTag(db, fmt.Sprintf("%d", int64(id)), tag)
 }

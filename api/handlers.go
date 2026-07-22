@@ -1,124 +1,199 @@
 package api
 
 import (
-	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
+	"deepseek_golang_demo/agent"
 	"deepseek_golang_demo/models"
 	"deepseek_golang_demo/services/actions"
-	"deepseek_golang_demo/services/deepseek"
 
 	"github.com/gin-gonic/gin"
 )
 
 type Server struct {
-	db          *sql.DB
-	deepseekCli *deepseek.Client
+	store               *models.Store
+	runner              *agent.Runner
+	executor            *actions.Executor
+	maxRequestBodyBytes int64
 }
 
-func NewServer(db *sql.DB, deepseekCli *deepseek.Client) *Server {
-	return &Server{
-		db:          db,
-		deepseekCli: deepseekCli,
-	}
+func NewServer(store *models.Store, runner *agent.Runner, executor *actions.Executor, maxRequestBodyBytes int64) *Server {
+	return &Server{store: store, runner: runner, executor: executor, maxRequestBodyBytes: maxRequestBodyBytes}
 }
 
-func (s *Server) SetupRoutes(r *gin.Engine) {
-	api := r.Group("/api")
-	api.POST("/analyze/:id", s.HandleAnalyzeData)
-	api.POST("/records", s.HandleCreateRecord)
-	api.GET("/records/:id", s.HandleGetRecord)
+func (s *Server) SetupRoutes(router *gin.Engine, authToken string, rateLimit int) {
+	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	api := router.Group("/api", authMiddleware(authToken), rateLimitMiddleware(rateLimit))
+	api.POST("/records", s.handleCreateRecord)
+	api.GET("/records/:id", s.handleGetRecord)
+	api.POST("/analyze/:id", s.handleAnalyzeData)
+	api.GET("/runs/:id", s.handleGetRun)
+	api.POST("/approvals/:id/approve", s.handleApprove)
+	api.POST("/approvals/:id/reject", s.handleReject)
 }
 
-func (s *Server) HandleAnalyzeData(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		log.Printf("无效的记录ID: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的记录ID"})
+func (s *Server) handleCreateRecord(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.maxRequestBodyBytes)
+	var record models.DataRecord
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
+	record.Type = strings.TrimSpace(strings.ToLower(record.Type))
+	if record.Type != "text" && record.Type != "metric" && record.Type != "log" {
+		writeError(c, http.StatusBadRequest, "type must be text, metric, or log", nil)
+		return
+	}
+	record.Content = strings.TrimSpace(record.Content)
+	if record.Content == "" {
+		writeError(c, http.StatusBadRequest, "content is required", nil)
+		return
+	}
+	if len(record.Content) > 500_000 {
+		writeError(c, http.StatusRequestEntityTooLarge, "content is too large", nil)
+		return
+	}
+	if len(record.Metadata) > 0 && !json.Valid(record.Metadata) {
+		writeError(c, http.StatusBadRequest, "metadata must be valid JSON", nil)
+		return
+	}
+	if err := s.store.CreateDataRecord(c.Request.Context(), &record); err != nil {
+		writeError(c, http.StatusInternalServerError, "create record failed", err)
+		return
+	}
+	c.JSON(http.StatusCreated, record)
+}
 
-	record, err := models.GetDataRecord(s.db, id)
+func (s *Server) handleGetRecord(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	detail, err := s.store.GetRecordDetail(c.Request.Context(), id)
 	if err != nil {
-		log.Printf("获取记录失败 (ID: %d): %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取记录失败: %v", err)})
+		writeError(c, http.StatusInternalServerError, "get record failed", err)
+		return
+	}
+	if detail == nil {
+		writeError(c, http.StatusNotFound, "record not found", nil)
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
+func (s *Server) handleAnalyzeData(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	record, err := s.store.GetDataRecord(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "get record failed", err)
 		return
 	}
 	if record == nil {
-		log.Printf("记录未找到 (ID: %d)", id)
-		c.JSON(http.StatusNotFound, gin.H{"error": "记录未找到"})
+		writeError(c, http.StatusNotFound, "record not found", nil)
 		return
 	}
-
-	// 构建分析提示词
-	prompt := fmt.Sprintf("请分析以下%s类型的数据：\n%s", record.Type, record.Content)
-
-	// 调用DeepSeek API进行分析
-	response, err := s.deepseekCli.AnalyzeData(prompt, record)
+	result, err := s.runner.Run(c.Request.Context(), record)
 	if err != nil {
-		log.Printf("数据分析失败 (ID: %d): %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("数据分析失败: %v", err)})
+		writeError(c, http.StatusBadGateway, "agent run failed", err)
 		return
 	}
-
-	// 保存分析结果
-	result := &models.AnalysisResult{
-		RecordID:    id,
-		Analysis:    response.Analysis,
-		Suggestions: response.Suggestions,
-		Confidence:  response.Confidence,
-	}
-
-	if err := models.SaveAnalysisResult(s.db, result); err != nil {
-		log.Printf("保存分析结果失败 (ID: %d): %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("保存分析结果失败: %v", err)})
-		return
-	}
-
-	// 执行建议的操作
-	for i, action := range response.Actions {
-		if err := actions.ExecuteAction(action, s.db); err != nil {
-			log.Printf("执行操作失败 (ID: %d, 操作索引: %d, 类型: %s): %v", id, i, action.Type, err)
-		}
-	}
-
 	c.JSON(http.StatusOK, result)
 }
 
-func (s *Server) HandleCreateRecord(c *gin.Context) {
-	var record models.DataRecord
-	if err := c.ShouldBindJSON(&record); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+func (s *Server) handleGetRun(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
 		return
 	}
-
-	if err := models.CreateDataRecord(s.db, &record); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error creating record: %v", err)})
+	run, steps, err := s.store.GetAgentRun(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "get agent run failed", err)
 		return
 	}
-
-	c.JSON(http.StatusOK, record)
+	if run == nil {
+		writeError(c, http.StatusNotFound, "agent run not found", nil)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"run": run, "steps": steps})
 }
 
-func (s *Server) HandleGetRecord(c *gin.Context) {
+type decisionRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (s *Server) handleApprove(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var request decisionRequest
+	_ = c.ShouldBindJSON(&request)
+	approval, err := s.store.GetApproval(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "get approval failed", err)
+		return
+	}
+	if approval == nil {
+		writeError(c, http.StatusNotFound, "approval not found", nil)
+		return
+	}
+	if approval.Status != "pending" {
+		writeError(c, http.StatusConflict, "approval is already decided", nil)
+		return
+	}
+	result := s.executor.ExecuteApprovedNotification(c.Request.Context(), approval)
+	if result.Status != "succeeded" {
+		writeError(c, http.StatusBadGateway, "approved action failed", errors.New(result.Error))
+		return
+	}
+	if err := s.store.DecideApproval(c.Request.Context(), id, "approved", strings.TrimSpace(request.Reason)); err != nil {
+		writeError(c, http.StatusConflict, "approval decision failed", err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) handleReject(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var request decisionRequest
+	_ = c.ShouldBindJSON(&request)
+	if err := s.store.DecideApproval(c.Request.Context(), id, "rejected", strings.TrimSpace(request.Reason)); err != nil {
+		writeError(c, http.StatusConflict, "approval decision failed", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "rejected"})
+}
+
+func parseID(c *gin.Context) (int64, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid record ID"})
-		return
+	if err != nil || id <= 0 {
+		writeError(c, http.StatusBadRequest, "invalid ID", err)
+		return 0, false
 	}
+	return id, true
+}
 
-	record, err := models.GetDataRecord(s.db, id)
+func writeError(c *gin.Context, status int, message string, err error) {
+	requestID := c.GetHeader("X-Request-ID")
+	payload := gin.H{"error": message}
+	if requestID != "" {
+		payload["requestId"] = requestID
+	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error getting record: %v", err)})
-		return
+		fmt.Printf("request failed: %s: %v\n", message, err)
 	}
-	if record == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, record)
+	c.JSON(status, payload)
 }

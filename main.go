@@ -1,107 +1,85 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
+	"deepseek_golang_demo/agent"
 	"deepseek_golang_demo/api"
+	"deepseek_golang_demo/config"
 	"deepseek_golang_demo/models"
+	"deepseek_golang_demo/services/actions"
 	"deepseek_golang_demo/services/deepseek"
+	"deepseek_golang_demo/services/notification"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/mysql"
-	"github.com/golang-migrate/migrate/v4/source/file"
-	"github.com/joho/godotenv"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
 
-// runDatabaseMigrations 执行数据库迁移
 func runDatabaseMigrations(db *sql.DB) (*migrate.Migrate, error) {
-	// 创建file source实例
-	fsrc, err := (&file.File{}).Open("file://migrations")
+	driver, err := mysql.WithInstance(db, &mysql.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create file source: %v", err)
+		return nil, fmt.Errorf("create migration driver: %w", err)
 	}
-
-	// 创建mysql driver实例
-	config := mysql.Config{}
-	driver, err := mysql.WithInstance(db, &config)
+	m, err := migrate.NewWithDatabaseInstance("file://migrations", "mysql", driver)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create mysql driver: %v", err)
+		return nil, fmt.Errorf("create migration instance: %w", err)
 	}
-
-	// 创建migrate实例
-	m, err := migrate.NewWithInstance(
-		"file", fsrc,
-		"mysql", driver,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create migrate instance: %v", err)
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return nil, fmt.Errorf("run migrations: %w", err)
 	}
-
-	// 执行迁移
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return nil, fmt.Errorf("failed to run migrations: %v", err)
-	}
-
 	return m, nil
 }
 
 func main() {
-	// 加载环境变量
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
-	}
-
-	// 获取配置
-	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	dbDSN := os.Getenv("DB_DSN")
-	if apiKey == "" || dbDSN == "" {
-		log.Fatal("DEEPSEEK_API_KEY and DB_DSN must be set in .env file")
-	}
-
-	// 初始化数据库连接
-	db, err := models.NewDB(dbDSN)
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		log.Fatalf("load configuration: %v", err)
 	}
-
-	// 运行数据库迁移
+	db, err := models.NewDB(cfg.DBDSN)
+	if err != nil {
+		log.Fatalf("connect database: %v", err)
+	}
+	defer db.Close()
 	m, err := runDatabaseMigrations(db)
 	if err != nil {
-		log.Fatalf("Failed to run database migrations: %v", err)
+		log.Fatalf("migrate database: %v", err)
 	}
-	// 在应用退出时关闭迁移实例
-	defer func() {
-		if m != nil {
-			sourceErr, dbErr := m.Close()
-			if sourceErr != nil {
-				log.Printf("Error closing migration source: %v", sourceErr)
-			}
-			if dbErr != nil {
-				log.Printf("Error closing migration database: %v", dbErr)
-			}
+	defer m.Close()
+
+	store := models.NewStore(db)
+	client := deepseek.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel, cfg.DeepSeekTimeout)
+	notifier := notification.NewSender(notification.Config{SMTPHost: cfg.SMTPHost, SMTPPort: cfg.SMTPPort, SMTPUser: cfg.SMTPUser, SMTPPass: cfg.SMTPPass, SMTPFrom: cfg.SMTPFrom, SMTPStartTLS: cfg.SMTPStartTLS, EmailTargets: cfg.EmailTargets, WebhookTargets: cfg.WebhookTargets, AllowHTTPWebhooks: cfg.AllowHTTPWebhooks, AllowPrivateWebhooks: cfg.AllowPrivateWebhooks, Timeout: cfg.NotificationTimeout})
+	executor := actions.NewExecutor(store, notifier, cfg.RequireNotifyApproval)
+	runner := agent.NewRunner(client, executor, store, cfg.AgentMaxSteps, cfg.AgentMaxOutputTokens)
+	router := gin.New()
+	router.Use(gin.Logger(), gin.Recovery())
+	server := api.NewServer(store, runner, executor, cfg.MaxRequestBodyBytes)
+	server.SetupRoutes(router, cfg.APIAuthToken, cfg.RateLimitPerMinute)
+
+	httpServer := &http.Server{Addr: ":" + cfg.Port, Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.DeepSeekTimeout + 15*time.Second, IdleTimeout: 60 * time.Second}
+	go func() {
+		log.Printf("server listening on %s with model %s", httpServer.Addr, cfg.DeepSeekModel)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("serve HTTP: %v", err)
 		}
 	}()
-
-	// 初始化DeepSeek客户端
-	deepseekCli := deepseek.NewClient(apiKey)
-
-	// 初始化HTTP服务器
-	server := api.NewServer(db, deepseekCli)
-	router := gin.Default()
-	server.SetupRoutes(router)
-
-	// 启动服务器
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	fmt.Printf("Server starting on port %s...\n", port)
-	if err := router.Run(":" + port); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
 	}
 }
