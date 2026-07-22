@@ -2,17 +2,11 @@
 
 这是一个使用 DeepSeek Function Calling 构建的受约束数据分析 Agent。
 
-## 项目架构图
+## 项目概览
 
-下面的卡通架构图展示了客户端、Gin API、Agent 核心、能力服务、MySQL 与安全护栏之间的关系。
+下图集中展示了项目架构、Agent 多轮规划与工具调用的数据流程，以及安全护栏和核心能力。
 
-![DeepSeek Golang Agent 项目架构图](docs/architecture-cartoon.svg)
-
-## 数据流程图
-
-Agent 会把每次工具执行结果作为 Observation 回传给模型，并根据任务状态继续规划或生成最终分析。
-
-![DeepSeek Golang Agent 数据流程图](docs/data-flow-cartoon.svg)
+![DeepSeek Golang Agent 项目架构与数据流程总览](docs/readme-overview.png)
 
 ## 核心能力
 
