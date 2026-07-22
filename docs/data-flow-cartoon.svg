@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="620" viewBox="0 0 1500 620">
+  <defs>
+    <style>
+      .title{font:700 34px sans-serif;fill:#253047}.label{font:700 20px sans-serif;fill:#253047}.small{font:15px sans-serif;fill:#44516a}.step{stroke:#253047;stroke-width:3;rx:22;ry:22}.arrow{stroke:#253047;stroke-width:5;fill:none;marker-end:url(#m)}.loop{stroke:#7c4dff;stroke-width:5;stroke-dasharray:12 10;fill:none;marker-end:url(#p)}
+    </style>
+    <marker id="m" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#253047"/></marker>
+    <marker id="p" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#7c4dff"/></marker>
+  </defs>
+  <rect width="1500" height="620" fill="#fffaf0"/>
+  <text x="750" y="58" text-anchor="middle" class="title">DeepSeek Golang Agent · 数据流程图</text>
+
+  <g transform="translate(35,145)">
+    <rect width="155" height="250" fill="#dff3ff" class="step"/>
+    <circle cx="78" cy="70" r="34" fill="#ffd7b5" stroke="#253047" stroke-width="3"/>
+    <rect x="38" y="115" width="80" height="48" rx="10" fill="#8ed1fc" stroke="#253047" stroke-width="3"/>
+    <text x="78" y="195" text-anchor="middle" class="label">1. 创建请求</text>
+    <text x="78" y="222" text-anchor="middle" class="small">提交 record_id</text>
+  </g>
+
+  <g transform="translate(225,145)">
+    <rect width="155" height="250" fill="#e8f7e8" class="step"/>
+    <ellipse cx="78" cy="65" rx="45" ry="18" fill="#62b6cb" stroke="#253047" stroke-width="3"/>
+    <rect x="33" y="65" width="90" height="55" fill="#62b6cb" stroke="#253047" stroke-width="3"/>
+    <ellipse cx="78" cy="120" rx="45" ry="18" fill="#4aa3b8" stroke="#253047" stroke-width="3"/>
+    <text x="78" y="195" text-anchor="middle" class="label">2. 加载数据</text>
+    <text x="78" y="222" text-anchor="middle" class="small">记录与上下文</text>
+  </g>
+
+  <g transform="translate(415,145)">
+    <rect width="155" height="250" fill="#f0e8ff" class="step"/>
+    <circle cx="78" cy="74" r="43" fill="#b794f4" stroke="#253047" stroke-width="3"/>
+    <rect x="48" y="56" width="60" height="40" rx="12" fill="#fff" stroke="#253047" stroke-width="3"/>
+    <circle cx="65" cy="76" r="6" fill="#253047"/><circle cx="91" cy="76" r="6" fill="#253047"/>
+    <text x="78" y="195" text-anchor="middle" class="label">3. Agent 规划</text>
+    <text x="78" y="222" text-anchor="middle" class="small">选择下一步工具</text>
+  </g>
+
+  <g transform="translate(605,145)">
+    <rect width="155" height="250" fill="#fff1cc" class="step"/>
+    <path d="M45 65 l28 28 l45-52" stroke="#253047" stroke-width="10" fill="none" stroke-linecap="round"/>
+    <text x="78" y="195" text-anchor="middle" class="label">4. 工具调用</text>
+    <text x="78" y="222" text-anchor="middle" class="small">严格 Function Calling</text>
+  </g>
+
+  <g transform="translate(795,145)">
+    <rect width="155" height="250" fill="#ffe4d6" class="step"/>
+    <circle cx="78" cy="74" r="44" fill="#ff9f68" stroke="#253047" stroke-width="3"/>
+    <path d="M78 42 v64 M46 74 h64" stroke="#fff" stroke-width="10" stroke-linecap="round"/>
+    <text x="78" y="195" text-anchor="middle" class="label">5. 执行工具</text>
+    <text x="78" y="222" text-anchor="middle" class="small">数据库 / 标签 / 通知</text>
+  </g>
+
+  <g transform="translate(985,145)">
+    <rect width="155" height="250" fill="#ffdfe8" class="step"/>
+    <path d="M35 55 h86 q18 0 18 18 v38 q0 18-18 18 h-45 l-24 20 v-20 h-17 q-18 0-18-18 v-38 q0-18 18-18z" fill="#ff8fb1" stroke="#253047" stroke-width="3"/>
+    <text x="78" y="195" text-anchor="middle" class="label">6. 结果回传</text>
+    <text x="78" y="222" text-anchor="middle" class="small">成功 / 错误 / 待审批</text>
+  </g>
+
+  <g transform="translate(1175,145)">
+    <rect width="155" height="250" fill="#e1ecff" class="step"/>
+    <path d="M50 62 q28-30 56 0" fill="none" stroke="#4776e6" stroke-width="9" stroke-linecap="round"/>
+    <path d="M108 48 l8 24-24-8" fill="#4776e6"/>
+    <text x="78" y="195" text-anchor="middle" class="label">7. 重新规划</text>
+    <text x="78" y="222" text-anchor="middle" class="small">未完成则继续</text>
+  </g>
+
+  <g transform="translate(1365,145)">
+    <rect width="100" height="250" fill="#dff7ee" class="step"/>
+    <circle cx="50" cy="80" r="36" fill="#62c370" stroke="#253047" stroke-width="3"/>
+    <path d="M31 80 l13 14 27-31" stroke="#fff" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="50" y="195" text-anchor="middle" class="label">8. 完成</text>
+    <text x="50" y="222" text-anchor="middle" class="small">保存分析</text>
+  </g>
+
+  <path d="M190 270 H225" class="arrow"/><path d="M380 270 H415" class="arrow"/><path d="M570 270 H605" class="arrow"/><path d="M760 270 H795" class="arrow"/><path d="M950 270 H985" class="arrow"/><path d="M1140 270 H1175" class="arrow"/><path d="M1330 270 H1365" class="arrow"/>
+
+  <path d="M1252 410 C1252 535 492 535 492 408" class="loop"/>
+  <text x="870" y="565" text-anchor="middle" class="label" fill="#7c4dff">未完成：携带 Observation 回到 Planner，直到完成或达到最大步数</text>
+</svg>
